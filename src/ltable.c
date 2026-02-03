@@ -228,10 +228,10 @@ static unsigned int computesizes (unsigned int nums[], unsigned int *narray) {
   unsigned int a = 0;  /* number of elements smaller than 2^i */
   unsigned int na = 0;  /* number of elements to go to array part */
   unsigned int n = 0;  /* optimal size for array part */
-  for (i = 0, twotoi = 1; twotoi/2 < *narray; i++, twotoi *= 2) {
+  for (i = 0, twotoi = 1; twotoi/2 < *narray; i++, twotoi *= 2) {  // (2^i) /2  < 数组使用数量 为迭代停止条件
     if (nums[i] > 0) {
-      a += nums[i];
-      if (a > twotoi/2) {  /* more than half elements present? */
+      a += nums[i];  // a一直在统计数组是使用量
+      if (a > twotoi/2) {  // 数组在这个区间的使用量 > (2^i)/2  才会被允许使用这个2^i长度。本质上是在求这个2^i大小 数组元素的稠密度是否满足
         n = twotoi;  /* optimal size (till now) */
         na = a;  /* all elements up to 'n' will go to array part */
       }
@@ -381,12 +381,12 @@ static void rehash (lua_State *L, Table *t, const TValue *ek) {
   int i;
   int totaluse;
   for (i = 0; i <= MAXABITS; i++) nums[i] = 0;  /* reset counts */
-  nasize = numusearray(t, nums);  /* count keys in array part */
-  totaluse = nasize;  /* all those keys are integer keys */
-  totaluse += numusehash(t, nums, &nasize);  /* count keys in hash part */
+  nasize = numusearray(t, nums);   // 算数组元素 在每个区间的分布数量，返回使用总数  [ ... , 2^2,2^1, 2^0]
+  totaluse = nasize;  
+  totaluse += numusehash(t, nums, &nasize);  // 计算哈希表的数字总数
   /* count extra key */
-  nasize += countint(ek, nums);
-  totaluse++;
+  nasize += countint(ek, nums);  //  上keyindex额外的，如果命中区间，就在区间+1，并且返回1
+  totaluse++;                    // 总使用也+1
   /* compute new size for array part */
   na = computesizes(nums, &nasize);
   /* resize the table to new computed sizes */
@@ -496,12 +496,12 @@ TValue *luaH_newkey (lua_State *L, Table *t, const TValue *key) {
 */
 const TValue *luaH_getint (Table *t, lua_Integer key) {
   /* (1 <= key && key <= t->sizearray) */
-  if (l_castS2U(key - 1) < t->sizearray)
+  if (l_castS2U(key - 1) < t->sizearray)   // 小于数组长度就从数组里获取
     return &t->array[key - 1];
-  else {
+  else {                         // 不然就从哈希表里取
     Node *n = hashint(t, key);
     for (;;) {  /* check whether 'key' is somewhere in the chain */
-      if (ttisinteger(gkey(n)) && ivalue(gkey(n)) == key)
+      if (ttisinteger(gkey(n)) && ivalue(gkey(n)) == key)  
         return gval(n);  /* that's it */
       else {
         int nx = gnext(n);
