@@ -217,10 +217,10 @@ GCObject *luaC_newobj (lua_State *L, int tt, size_t sz) {
 
 
 /*
-** mark an object. Userdata, strings, and closed upvalues are visited
-** and turned black here. Other objects are marked gray and added
-** to appropriate list to be visited (and turned black) later. (Open
-** upvalues are already linked in 'headuv' list.)
+** 标记一个GC对象。其中，用户数据（userdata）、字符串（string）和闭合上值（closed upvalue）
+** 会在此处被直接遍历处理并标记为黑色（存活终态）。其他类型的对象会被标记为灰色（待进一步遍历），
+** 同时被添加到对应的待处理列表中，等待后续流程遍历（并最终标记为黑色）。
+** （注：开放上值（open upvalue）已经被链接到了`headuv`列表中，无需在此处额外处理。）
 */
 static void reallymarkobject (global_State *g, GCObject *o) {
  reentry:
@@ -235,9 +235,9 @@ static void reallymarkobject (global_State *g, GCObject *o) {
     case LUA_TUSERDATA: {
       TValue uvalue;
       markobject(g, gco2u(o)->metatable);  /* mark its metatable */
-      gray2black(o);
+      gray2black(o);  // 标黑这个udata
       g->GCmemtrav += sizeudata(gco2u(o));
-      getuservalue(g->mainthread, gco2u(o), &uvalue);
+      getuservalue(g->mainthread, gco2u(o), &uvalue);  // udata 里面还有一个TValue类型的值
       if (valiswhite(&uvalue)) {  /* markvalue(g, &uvalue); */
         o = gcvalue(&uvalue);
         goto reentry;
@@ -281,6 +281,7 @@ static void markmt (global_State *g) {
 
 /*
 ** mark all objects in list of being-finalized
+*  把g->tobefnz里面全部标黑，表示已经扫描过了
 */
 static void markbeingfnz (global_State *g) {
   GCObject *o;
@@ -819,7 +820,9 @@ static void GCTM (lua_State *L, int propagateerrors) {
 
 
 /*
-** call a few (up to 'g->gcfinnum') finalizers
+tobefnz列表里面都是不会被抵达 __gc的对象。但是依旧是黑的。 
+这个方法会执行一部分量的(g->gcfinnum） 的__gc的对象 的__gc方法。  也就是这个方法GCTM
+
 */
 static int runafewfinalizers (lua_State *L) {
   global_State *g = G(L);
@@ -860,12 +863,12 @@ static GCObject **findlast (GCObject **p) {
 static void separatetobefnz (global_State *g, int all) {
   GCObject *curr;
   GCObject **p = &g->finobj;
-  GCObject **lastnext = findlast(&g->tobefnz);
+  GCObject **lastnext = findlast(&g->tobefnz);  // 这里用到了 g->tobefnz
   while ((curr = *p) != NULL) {  /* traverse all finalizable objects */
-    lua_assert(tofinalize(curr));
-    if (!(iswhite(curr) || all))  /* not being collected? */
-      p = &curr->next;  /* don't bother with it */
-    else {
+    lua_assert(tofinalize(curr));  // 确定是否是被标记成FINALIZEDBIT 的对象。说明他带__gc
+    if (!(iswhite(curr) || all))   // 不是白色，说明有引用，跳过。
+      p = &curr->next;  
+    else {   // 白色才会被移入 tobefnz 列表
       *p = curr->next;  /* remove 'curr' from 'finobj' list */
       curr->next = *lastnext;  /* link at the end of 'tobefnz' list */
       *lastnext = curr;
@@ -886,7 +889,7 @@ void luaC_checkfinalizer (lua_State *L, GCObject *o, Table *mt) {
     return;  /* nothing to be done */
   else {  /* move 'o' to 'finobj' list */
     GCObject **p;
-    if (issweepphase(g)) {
+    if (issweepphase(g)) {  // 是否在gc的原子阶段。
       makewhite(g, o);  /* "sweep" object 'o' */
       if (g->sweepgc == &o->next)  /* should not remove 'sweepgc' object */
         g->sweepgc = sweeptolive(L, g->sweepgc, NULL);  /* change 'sweepgc' */
@@ -989,9 +992,9 @@ static l_mem atomic (lua_State *L) {
   clearvalues(g, g->allweak, NULL);
   origweak = g->weak; origall = g->allweak;
   work += g->GCmemtrav;  /* stop counting (objects being finalized) */
-  separatetobefnz(g, 0);  /* separate objects to be finalized */
+  separatetobefnz(g, 0);  /* g->finobj   保存有__gc的被移动到 g->tobefnz */
   g->gcfinnum = 1;  /* there may be objects to be finalized */
-  markbeingfnz(g);  /* mark objects that will be finalized */
+  markbeingfnz(g);  /* 全部标黑，表示扫描过 */
   propagateall(g);  /* remark, to propagate 'resurrection' */
   g->GCmemtrav = 0;  /* restart counting */
   convergeephemerons(g);
@@ -1041,22 +1044,25 @@ static lu_mem singlestep (lua_State *L) {
         g->gcstate = GCSatomic;  /* finish propagate phase */
       return g->GCmemtrav;  /* memory traversed in this step */
     }
-    case GCSatomic: {
+    case GCSatomic: {  // 原子阶段很精髓，他指的是后续的所有步骤会一次执行完。不在分帧执行
       lu_mem work;
       int sw;
       propagateall(g);  /* make sure gray list is empty */
       work = atomic(L);  /* work is what was traversed by 'atomic' */
-      sw = entersweep(L);
+      sw = entersweep(L);  
+      // 清理g->allgc 的内存，直到第一个存活。 然后跳转到GCSswpallgc阶段，
+      // g->sweepgc 指向 &g->allgc 的某处
+      
       g->GCestimate = gettotalbytes(g);  /* first estimate */;
       return work + sw * GCSWEEPCOST;
     }
-    case GCSswpallgc: {  /* sweep "regular" objects */
+    case GCSswpallgc: {    //g->sweepgc 此时指向g->allgc，清理完指向 g->finobj  
       return sweepstep(L, g, GCSswpfinobj, &g->finobj);
     }
-    case GCSswpfinobj: {  /* sweep objects with finalizers */
+    case GCSswpfinobj: {    //g->sweepgc 此时指向g->finobj ，清理完指向 g->tobefnz  
       return sweepstep(L, g, GCSswptobefnz, &g->tobefnz);
     }
-    case GCSswptobefnz: {  /* sweep objects to be finalized */
+    case GCSswptobefnz: {   //g->sweepgc 此时指向g->tobefnz ，清理完指向 进入 GCSswpend 阶段  
       return sweepstep(L, g, GCSswpend, NULL);
     }
     case GCSswpend: {  /* finish sweeps */
@@ -1065,12 +1071,12 @@ static lu_mem singlestep (lua_State *L) {
       g->gcstate = GCScallfin;
       return 0;
     }
-    case GCScallfin: {  /* call remaining finalizers */
-      if (g->tobefnz && g->gckind != KGC_EMERGENCY) {
+    case GCScallfin: {  /* call remaining finalizers */ 
+      if (g->tobefnz && g->gckind != KGC_EMERGENCY) { // gc完成阶段 理论上 g->tobefnz不应该有东西。这里兜底处理
         int n = runafewfinalizers(L);
         return (n * GCFINALIZECOST);
       }
-      else {  /* emergency mode or no more finalizers */
+      else {   // 跳转到暂停阶段   /* emergency mode or no more finalizers */
         g->gcstate = GCSpause;  /* finish collection */
         return 0;
       }
