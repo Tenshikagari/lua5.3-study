@@ -164,7 +164,7 @@ typedef struct lua_TValue TValue;
 #define clLvalue(o)	check_exp(ttisLclosure(o), gco2lcl(val_(o).gc))
 #define clCvalue(o)	check_exp(ttisCclosure(o), gco2ccl(val_(o).gc))
 #define fvalue(o)	check_exp(ttislcf(o), val_(o).f)
-#define hvalue(o)	check_exp(ttistable(o), gco2t(val_(o).gc))
+#define hvalue(o)	check_exp(ttistable(o), gco2t(val_(o).gc))  // check_exp不用管，只是一个类型断言。 这一行的意思是把TValue类型转换成Table类型
 #define bvalue(o)	check_exp(ttisboolean(o), val_(o).b)
 #define thvalue(o)	check_exp(ttisthread(o), gco2th(val_(o).gc))
 /* a dead value may get the 'gc' field, but cannot access its contents */
@@ -356,6 +356,9 @@ typedef union UUdata {
 **  Get the address of memory block inside 'Udata'.
 ** (Access to 'ttuv_' ensures that value is really a 'Udata'.)
 */
+
+//  cast(char*, (u)) 指向了这个uudata的开始地址 sizeof(Udata) 这个结构体的大小
+//  算出来的位置就是udata的内存块末尾的位置，也就是我们申请的自定义内存块的位置
 #define getudatamem(u)  \
   check_exp(sizeof((u)->ttuv_), (cast(char*, (u)) + sizeof(UUdata)))
 

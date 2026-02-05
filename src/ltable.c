@@ -228,26 +228,32 @@ static unsigned int computesizes (unsigned int nums[], unsigned int *narray) {
   unsigned int a = 0;  /* number of elements smaller than 2^i */
   unsigned int na = 0;  /* number of elements to go to array part */
   unsigned int n = 0;  /* optimal size for array part */
-  for (i = 0, twotoi = 1; twotoi/2 < *narray; i++, twotoi *= 2) {  // (2^i) /2  < 数组使用数量 为迭代停止条件
+  
+  // *narray 整个luatable 数字元素的数量
+  //  twotoi/2 < *narray => 期望的数组长度必小于 < 2倍的当前数组元素数据量。 当然 数组长度是只会是2的n次幂  twotoi *= 2
+  for (i = 0, twotoi = 1; twotoi/2 < *narray; i++, twotoi *= 2) {  
+    
     if (nums[i] > 0) {
-      a += nums[i];  // a一直在统计数组是使用量
-      if (a > twotoi/2) {  // 数组在这个区间的使用量 > (2^i)/2  才会被允许使用这个2^i长度。本质上是在求这个2^i大小 数组元素的稠密度是否满足
-        n = twotoi;  /* optimal size (till now) */
-        na = a;  /* all elements up to 'n' will go to array part */
+      a += nums[i];  // 截止到当前区间(twotoi,0] 的数组元素数量
+
+      //  这个区间的使用量 > (2^i)/2  才会被允许使用这个2^i长度。 本质上是在看数组元素在本区间是否稠密
+      if (a > twotoi/2) {    
+        n = twotoi;  
+        na = a;  
       }
     }
     if (a == *narray) break;  /* all elements already counted */
   }
   *narray = n;
-  lua_assert(*narray/2 <= na && na <= *narray);
+  lua_assert(*narray/2 <= na && na <= *narray); // 这里只是断言，必然满足这个条件。可以不管
   return na;
 }
 
-
+// 算一个key是否为数字索引，是不是数组有效元素，增加本key在区间的分布数量。
 static int countint (const TValue *key, unsigned int *nums) {
-  unsigned int k = arrayindex(key);
-  if (k != 0) {  /* is 'key' an appropriate array index? */
-    nums[luaO_ceillog2(k)]++;  /* count as such */
+  unsigned int k = arrayindex(key); //求这个key是不是合法的数字索引
+  if (k != 0) {   
+    nums[luaO_ceillog2(k)]++;  //计数区间++
     return 1;
   }
   else
@@ -262,20 +268,21 @@ static unsigned int numusearray (const Table *t, unsigned int *nums) {
   unsigned int i = 1;  /* count to traverse all array keys */
   /* traverse each slice */
   for (lg = 0, ttlg = 1; lg <= MAXABITS; lg++, ttlg *= 2) {
-    unsigned int lc = 0;  /* counter */
+    unsigned int lc = 0;  
     unsigned int lim = ttlg;
-    if (lim > t->sizearray) {
-      lim = t->sizearray;  /* adjust upper limit */
+
+    if (lim > t->sizearray) {    // 这里只是边界优化，少遍历几次，不影响结果
+      lim = t->sizearray;  
       if (i > lim)
-        break;  /* no more elements to count */
+        break;  
     }
-    /* count elements in range (2^(lg - 1), 2^lg] */
-    for (; i <= lim; i++) {
+
+    for (; i <= lim; i++) {  //统计数组在区间  (2^(lg - 1)，2^lg] 有多少个元素
       if (!ttisnil(&t->array[i-1]))
         lc++;
     }
     nums[lg] += lc;
-    ause += lc;
+    ause += lc;  // alluse的意思 数组里面总的有多少个有效元素
   }
   return ause;
 }
@@ -283,18 +290,18 @@ static unsigned int numusearray (const Table *t, unsigned int *nums) {
 
 static int numusehash (const Table *t, unsigned int *nums,
                        unsigned int *pnasize) {
-  int totaluse = 0;  /* total number of elements */
-  int ause = 0;  /* elements added to 'nums' (can go to array part) */
+  int totaluse = 0;  
+  int ause = 0; 
   int i = sizenode(t);
   while (i--) {
     Node *n = &t->node[i];
     if (!ttisnil(gval(n))) {
-      ause += countint(gkey(n), nums);
+      ause += countint(gkey(n), nums);  // 算一个key  
       totaluse++;
     }
   }
-  *pnasize += ause;
-  return totaluse;
+  *pnasize += ause; //数组元素 += 哈希表统计出来可以成为数字索引的元素
+  return totaluse; // 哈希表内总的元素
 }
 
 
@@ -315,11 +322,15 @@ static void setnodevector (lua_State *L, Table *t, unsigned int size) {
   }
   else {
     int i;
+    // size 是需要插入哈希表的元素数量
+    // 期望的新哈希表大小  2 ^  【  1+   下取整(log2(size)) 】  
     lsize = luaO_ceillog2(size);
     if (lsize > MAXHBITS)
       luaG_runerror(L, "table overflow");
     size = twoto(lsize);
-    t->node = luaM_newvector(L, size, Node);
+ 
+    // 重新分配了哈希表数组 
+    t->node = luaM_newvector(L, size, Node);  // 初始化工作而已啦~
     for (i = 0; i < (int)size; i++) {
       Node *n = gnode(t, i);
       gnext(n) = 0;
@@ -338,32 +349,36 @@ void luaH_resize (lua_State *L, Table *t, unsigned int nasize,
   int j;
   unsigned int oldasize = t->sizearray;
   int oldhsize = t->lsizenode;
-  Node *nold = t->node;  /* save old hash ... */
-  if (nasize > oldasize)  /* array part must grow? */
+  Node *nold = t->node;   //哈希表数组的头
+  
+  //******  数组变大，直接新创建大数组把之前的拷贝过去即可 ******
+  if (nasize > oldasize)   
     setarrayvector(L, t, nasize);
-  /* create new hash part with appropriate size */
-  setnodevector(L, t, nhsize);
-  if (nasize < oldasize) {  /* array part must shrink? */
+ 
+  //****** 重新分配一个哈希表，大小为 2^[1+ 下取整(log2(nhsize))] ******
+  setnodevector(L, t, nhsize);   
+
+  //******  数组变小，放不下的部直接 插入哈希表****** 
+  if (nasize < oldasize) {   
     t->sizearray = nasize;
-    /* re-insert elements from vanishing slice */
     for (i=nasize; i<oldasize; i++) {
       if (!ttisnil(&t->array[i]))
-        luaH_setint(L, t, i + 1, &t->array[i]);
+        luaH_setint(L, t, i + 1, &t->array[i]); // 插入luatable 必然会插进刚刚分配的哈希表里
     }
-    /* shrink array */
-    luaM_reallocvector(L, t->array, oldasize, nasize, TValue);
+    luaM_reallocvector(L, t->array, oldasize, nasize, TValue); // 重分配一个短的数组。
   }
-  /* re-insert elements from hash part */
-  for (j = twoto(oldhsize) - 1; j >= 0; j--) {
+  
+  //***** 遍历旧哈希表，把哈希表部分 重插入一遍新的luatable ***** 
+  //一起解决了 哈希表变动需要重新哈希 和 数组变长需要从哈希表搬一部分到数组过来的问题
+  for (j = twoto(oldhsize) - 1; j >= 0; j--) { 
     Node *old = nold + j;
     if (!ttisnil(gval(old))) {
-      /* doesn't need barrier/invalidate cache, as entry was
-         already present in the table */
       setobjt2t(L, luaH_set(L, t, gkey(old)), gval(old));
     }
   }
-  if (!isdummy(nold))
-    luaM_freearray(L, nold, cast(size_t, twoto(oldhsize))); /* free old array */
+
+  if (!isdummy(nold)) //释放旧数组
+    luaM_freearray(L, nold, cast(size_t, twoto(oldhsize)));  
 }
 
 
@@ -371,6 +386,11 @@ void luaH_resizearray (lua_State *L, Table *t, unsigned int nasize) {
   int nsize = isdummy(t->node) ? 0 : sizenode(t);
   luaH_resize(L, t, nasize, nsize);
 }
+
+
+
+
+
 
 /*
 ** nums[i] = number of keys 'k' where 2^(i - 1) < k <= 2^i
@@ -380,19 +400,29 @@ static void rehash (lua_State *L, Table *t, const TValue *ek) {
   unsigned int nums[MAXABITS + 1];
   int i;
   int totaluse;
-  for (i = 0; i <= MAXABITS; i++) nums[i] = 0;  /* reset counts */
-  nasize = numusearray(t, nums);   // 算数组元素 在每个区间的分布数量，返回使用总数  [ ... , 2^2,2^1, 2^0]
+   // 构造计数区间，数组看起来是这样  [ 0,1,2 ...]
+   //逻辑上是 [2^0,2^1,2^2,2^3 ...]  nums[i] 对应 "2^i 到 2^(i+1)-1 有多少个数字元素
+  for (i = 0; i <= MAXABITS; i++) nums[i] = 0;    
+ 
+  nasize = numusearray(t, nums);   // 遍历数组元素，统计数组有效元素在这个区间的分布数量。
   totaluse = nasize;  
-  totaluse += numusehash(t, nums, &nasize);  // 计算哈希表的数字总数
-  /* count extra key */
-  nasize += countint(ek, nums);  //  上keyindex额外的，如果命中区间，就在区间+1，并且返回1
-  totaluse++;                    // 总使用也+1
-  /* compute new size for array part */
-  na = computesizes(nums, &nasize);
-  /* resize the table to new computed sizes */
+  totaluse += numusehash(t, nums, &nasize); // 遍历哈希表元素，统计哈希表在这个区间的分布数量。
+
+  nasize += countint(ek, nums);  //  算上新增的key，在计数区间上的分布
+  totaluse++;                    // 总计所有的元素(数字元素+非数字元素)
+
+  // 当前状况：
+  // totaluse： 所有元素数量
+  // nasize： key为数字元素的数量 
+  na = computesizes(nums, &nasize);  // 判断数组稠密程度，获得最佳数组的算法
+
+  // 当前状况：
+  // totaluse： 所有元素数量
+  // nasize： 将要构建的数组大小
+  // na: 是数组能存放数字元素数量
+  // 哈希表元素： totaluse - na 
   luaH_resize(L, t, nasize, totaluse - na);
 }
-
 
 
 /*

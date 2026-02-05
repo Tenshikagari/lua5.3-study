@@ -168,6 +168,8 @@ void luaV_gettable (lua_State *L, const TValue *t, TValue *key, StkId val) {
     if (ttistable(t)) {  /* 't' is a table? */
       Table *h = hvalue(t);
       const TValue *res = luaH_get(h, key); /* do a primitive get */
+
+      // 拿到了结果 || 无__index元方法)
       if (!ttisnil(res) ||  /* result is not nil? */
           (tm = fasttm(L, h->metatable, TM_INDEX)) == NULL) { /* or no TM? */
         setobj2s(L, val, res);  /* result is the raw get */
@@ -200,6 +202,10 @@ void luaV_settable (lua_State *L, const TValue *t, TValue *key, StkId val) {
       TValue *oldval = cast(TValue *, luaH_get(h, key));
       /* if previous value is not nil, there must be a previous entry
          in the table; a metamethod has no relevance */
+
+      // 有旧值（非nil） || (无__newindex元方法 && (有旧值占位 || 新建旧值位置))
+      // 这意味着，表里有的值再次被赋值。不会触发__newindex 直接赋值。
+
       if (!ttisnil(oldval) ||
          /* previous value is nil; must check the metamethod */
          ((tm = fasttm(L, h->metatable, TM_NEWINDEX)) == NULL &&
@@ -219,12 +225,12 @@ void luaV_settable (lua_State *L, const TValue *t, TValue *key, StkId val) {
     else  /* not a table; check metamethod */
       if (ttisnil(tm = luaT_gettmbyobj(L, t, TM_NEWINDEX)))
         luaG_typeerror(L, t, "index");
-    /* try the metamethod */
-    if (ttisfunction(tm)) {
+ 
+    if (ttisfunction(tm)) {  // 如果是元方法，直接call
       luaT_callTM(L, tm, t, key, val, 0);
       return;
     }
-    t = tm;  /* else repeat assignment over 'tm' */
+    t = tm;  // 如果是表就会继续索引。
   }
   luaG_runerror(L, "settable chain too long; possible loop");
 }
