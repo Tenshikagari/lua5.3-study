@@ -537,16 +537,19 @@ LUALIB_API int luaL_ref (lua_State *L, int t) {
     return LUA_REFNIL;  /* 'nil' has a unique fixed reference */
   }
   t = lua_absindex(L, t);
-  lua_rawgeti(L, t, freelist);  /* get first free element */
-  ref = (int)lua_tointeger(L, -1);  /* ref = t[freelist] */
-  lua_pop(L, 1);  /* remove it from stack */
-  if (ref != 0) {  /* any free element? */
-    lua_rawgeti(L, t, ref);  /* remove it from list */
-    lua_rawseti(L, t, freelist);  /* (t[freelist] = t[ref]) */
+
+ //  用唯一索引t去获得luatable。luatable[freelist](freelist = 0) 0位放入栈上
+  lua_rawgeti(L, t, freelist);    // [ 0号索引的值  , ... , 栈底]
+
+  ref = (int)lua_tointeger(L, -1);  // ref = 0号索引的值  
+  lua_pop(L, 1);   // [   ... , 栈底]
+  if (ref != 0) {  
+    lua_rawgeti(L, t, ref);  // [ table[ref], ... ,栈底]   
+    lua_rawseti(L, t, freelist);  // (table[freelist] = 栈上第一个值) 并且栈--    [... ,栈底]   
   }
-  else  /* no free elements */
-    ref = (int)lua_rawlen(L, t) + 1;  /* get a new reference */
-  lua_rawseti(L, t, ref);
+  else   // 没位置了
+    ref = (int)lua_rawlen(L, t) + 1;  /* get a new reference */  
+  lua_rawseti(L, t, ref);    //todo 这里很疑惑？他不会越界 导致写入到哈希表里吗
   return ref;
 }
 

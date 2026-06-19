@@ -83,6 +83,7 @@
 #define markvalue(g,o) { checkconsistency(o); \
   if (valiswhite(o)) reallymarkobject(g,gcvalue(o)); }
 
+// 标记一个被引用的对象，如果这个对象无法引用其他对象就标黑。可以就被丢去灰列表等待下次扫描
 #define markobject(g,t) \
   { if ((t) && iswhite(t)) reallymarkobject(g, obj2gco(t)); }
 
@@ -114,8 +115,8 @@ static void reallymarkobject (global_State *g, GCObject *o);
 */
 static void removeentry (Node *n) {
   lua_assert(ttisnil(gval(n)));
-  if (valiswhite(gkey(n)))
-    setdeadvalue(wgkey(n));  /* unused and unmarked key; remove it */
+  if (valiswhite(gkey(n))) // 判断这个key是否是白色的（可回收的）。
+    setdeadvalue(wgkey(n));  //把这个key标记为deadkey（死键）。死键是一种特殊类型，专用来做内部标记用。
 }
 
 
@@ -218,8 +219,8 @@ GCObject *luaC_newobj (lua_State *L, int tt, size_t sz) {
 
 /*
 ** 标记一个GC对象。其中，用户数据（userdata）、字符串（string）和闭合上值（closed upvalue）
-** 会在此处被直接遍历处理并标记为黑色（存活终态）。其他类型的对象会被标记为灰色（待进一步遍历），
-** 同时被添加到对应的待处理列表中，等待后续流程遍历（并最终标记为黑色）。
+**  标黑：这家伙是可达，并且已经处理完了这家伙的引用对象。
+**  标灰：这家伙是可达，这家伙的引用对象之后再处理。
 ** （注：开放上值（open upvalue）已经被链接到了`headuv`列表中，无需在此处额外处理。）
 */
 static void reallymarkobject (global_State *g, GCObject *o) {
@@ -339,44 +340,41 @@ static void restartcollection (global_State *g) {
 ** =======================================================
 */
 
-/*
-** Traverse a table with weak values and link it to proper list. During
-** propagate phase, keep it in 'grayagain' list, to be revisited in the
-** atomic phase. In the atomic phase, if table has any white value,
-** put it in 'weak' list, to be cleared.
-*/
+/**
+ * 遍历弱值表并链接到合适的列表。
+ * 在传播阶段：放入grayagain列表，等待原子阶段重新检查
+ * 在原子阶段：如果表中有任何白值，放入weak列表，准备清理
+ */
 static void traverseweakvalue (global_State *g, Table *h) {
   Node *n, *limit = gnodelast(h);
-  /* if there is array part, assume it may have white values (it is not
-     worth traversing it now just to check) */
-  int hasclears = (h->sizearray > 0);
-  for (n = gnode(h, 0); n < limit; n++) {  /* traverse hash part */
+
+  int hasclears = (h->sizearray > 0);   // 大于0 说明可能有白值
+  for (n = gnode(h, 0); n < limit; n++) {   // 遍历哈希表部分
     checkdeadkey(n);
-    if (ttisnil(gval(n)))  /* entry is empty? */
-      removeentry(n);  /* remove it */
+    if (ttisnil(gval(n)))  // &(n)->i_val 检查value是不是空
+      removeentry(n);      // 是空的话就移除这个entry 
     else {
       lua_assert(!ttisnil(gkey(n)));
-      markvalue(g, gkey(n));  /* mark key */
-      if (!hasclears && iscleared(g, gval(n)))  /* is there a white value? */
-        hasclears = 1;  /* table will have to be cleared */
+      markvalue(g, gkey(n));  // 标记key，丢进去gray列表
+      if (!hasclears && iscleared(g, gval(n)))   // 扫描一下是不是可能有白值
+        hasclears = 1;  
     }
   }
-  if (g->gcstate == GCSpropagate)
-    linkgclist(h, g->grayagain);  /* must retraverse it in atomic phase */
-  else if (hasclears)
-    linkgclist(h, g->weak);  /* has to be cleared later */
+  if (g->gcstate == GCSpropagate) // 传播阶段会被丢到grayagain链表里
+    linkgclist(h, g->grayagain); 
+  else if (hasclears)  // 原子阶段如果有白值，就丢到weak链表里，准备清理掉这些value
+    linkgclist(h, g->weak);  
 }
 
 
 /*
-** Traverse an ephemeron table and link it to proper list. Returns true
-** iff any object was marked during this traversal (which implies that
-** convergence has to continue). During propagation phase, keep table
-** in 'grayagain' list, to be visited again in the atomic phase. In
-** the atomic phase, if table has any white->white entry, it has to
-** be revisited during ephemeron convergence (as that key may turn
-** black). Otherwise, if it has any white key, table has to be cleared
-** (in the atomic phase).
+** 若本次遍历过程中标记了任意对象，则返回真（这意味着需要继续执行收敛检查）。
+** 在标记传播阶段（GCSpropagate），将表保留在 'grayagain' 链表中，
+** 待原子阶段（atomic phase）再次处理。
+** 在原子阶段：
+**   1. 若表中存在【白键→白值】的条目，该表需在 ephemeron 收敛过程中重新遍历
+**      （因为这些键可能会被标记为黑色/可达）；
+**   2. 若表中仅存在白键→黑灰值条目，则需在原子阶段清理这些白键。
 */
 static int traverseephemeron (global_State *g, Table *h) {
   int marked = 0;  /* true if an object is marked in this traversal */
@@ -384,35 +382,35 @@ static int traverseephemeron (global_State *g, Table *h) {
   int hasww = 0;  /* true if table has entry "white-key -> white-value" */
   Node *n, *limit = gnodelast(h);
   unsigned int i;
-  /* traverse array part */
+
   for (i = 0; i < h->sizearray; i++) {
     if (valiswhite(&h->array[i])) {
       marked = 1;
-      reallymarkobject(g, gcvalue(&h->array[i]));
+      reallymarkobject(g, gcvalue(&h->array[i])); // 标记value 
     }
   }
-  /* traverse hash part */
+
   for (n = gnode(h, 0); n < limit; n++) {
     checkdeadkey(n);
-    if (ttisnil(gval(n)))  /* entry is empty? */
-      removeentry(n);  /* remove it */
-    else if (iscleared(g, gkey(n))) {  /* key is not marked (yet)? */
-      hasclears = 1;  /* table must be cleared */
-      if (valiswhite(gval(n)))  /* value not marked yet? */
-        hasww = 1;  /* white-white entry */
+    if (ttisnil(gval(n)))  // 空值
+      removeentry(n);     // 删除kv对 
+    else if (iscleared(g, gkey(n))) {   // 白key
+      hasclears = 1;    // 有白key 必须得清理失效节点
+      if (valiswhite(gval(n)))   // 是否白value
+        hasww = 1;  // 双白标志位
     }
-    else if (valiswhite(gval(n))) {  /* value not marked yet? */
+    else if (valiswhite(gval(n))) {  // 非白 白key 单白value
       marked = 1;
-      reallymarkobject(g, gcvalue(gval(n)));  /* mark it now */
+      reallymarkobject(g, gcvalue(gval(n)));  // 标记value，说明value可达。注意 弱key只是不标记key而已，value还是要标记的。因为弱key只是弱引用，并不影响value的可达性。
     }
   }
-  /* link table into proper list */
+
   if (g->gcstate == GCSpropagate)
-    linkgclist(h, g->grayagain);  /* must retraverse it in atomic phase */
-  else if (hasww)  /* table has white->white entries? */
-    linkgclist(h, g->ephemeron);  /* have to propagate again */
-  else if (hasclears)  /* table has white keys? */
-    linkgclist(h, g->allweak);  /* may have to clean white keys */
+    linkgclist(h, g->grayagain);  // 传播阶段，丢到grayagain链表里
+  else if (hasww)  //原子阶段：双白
+    linkgclist(h, g->ephemeron);  // 原子阶段：双白节点丢进去 ephemeron，专门处理弱key的表
+  else if (hasclears)  // 原子阶段：白key  
+    linkgclist(h, g->allweak);  //说明这个kv对是应该被移除的。
   return marked;
 }
 
@@ -420,15 +418,15 @@ static int traverseephemeron (global_State *g, Table *h) {
 static void traversestrongtable (global_State *g, Table *h) {
   Node *n, *limit = gnodelast(h);
   unsigned int i;
-  for (i = 0; i < h->sizearray; i++)  /* traverse array part */
+  for (i = 0; i < h->sizearray; i++)  // 遍历数组部分
     markvalue(g, &h->array[i]);
-  for (n = gnode(h, 0); n < limit; n++) {  /* traverse hash part */
+  for (n = gnode(h, 0); n < limit; n++) {  //哈希表部分
     checkdeadkey(n);
-    if (ttisnil(gval(n)))  /* entry is empty? */
-      removeentry(n);  /* remove it */
+    if (ttisnil(gval(n)))  // kv中的v为空，那就标记为死key
+      removeentry(n); 
     else {
       lua_assert(!ttisnil(gkey(n)));
-      markvalue(g, gkey(n));  /* mark key */
+      markvalue(g, gkey(n));  //  标记key
       markvalue(g, gval(n));  /* mark value */
     }
   }
@@ -439,19 +437,19 @@ static lu_mem traversetable (global_State *g, Table *h) {
   const char *weakkey, *weakvalue;
   const TValue *mode = gfasttm(g, h->metatable, TM_MODE);
   markobject(g, h->metatable);
-  if (mode && ttisstring(mode) &&  /* is there a weak mode? */
-      ((weakkey = strchr(svalue(mode), 'k')),
-       (weakvalue = strchr(svalue(mode), 'v')),
-       (weakkey || weakvalue))) {  /* is really weak? */
-    black2gray(h);  /* keep table gray */
-    if (!weakkey)  /* strong keys? */
+  if (mode && ttisstring(mode) && 
+      ((weakkey = strchr(svalue(mode), 'k')),  // mode字符串里有k，表示弱key
+       (weakvalue = strchr(svalue(mode), 'v')),  // mode字符串里有v，表示弱value
+       (weakkey || weakvalue))) { 
+    black2gray(h); 
+    if (!weakkey)  // 仅强key
       traverseweakvalue(g, h);
-    else if (!weakvalue)  /* strong values? */
+    else if (!weakvalue)  /// 仅强值
       traverseephemeron(g, h);
-    else  /* all weak */
-      linkgclist(h, g->allweak);  /* nothing to traverse now */
+    else  // 弱key 和 弱value，丢去专属的弱链表。之后不再处理
+      linkgclist(h, g->allweak); 
   }
-  else  /* not weak */
+  else  // 普通表
     traversestrongtable(g, h);
   return sizeof(Table) + sizeof(TValue) * h->sizearray +
                          sizeof(Node) * cast(size_t, sizenode(h));
@@ -590,17 +588,17 @@ static void convergeephemerons (global_State *g) {
   int changed;
   do {
     GCObject *w;
-    GCObject *next = g->ephemeron;  /* get ephemeron list */
-    g->ephemeron = NULL;  /* tables may return to this list when traversed */
+    GCObject *next = g->ephemeron;   
+    g->ephemeron = NULL;   // ephemeron 表在遍历过程可能会被插入。所以把他拿出来
     changed = 0;
-    while ((w = next) != NULL) {
+    while ((w = next) != NULL) {  // 遍历ephemeron链表，
       next = gco2t(w)->gclist;
-      if (traverseephemeron(g, gco2t(w))) {  /* traverse marked some value? */
-        propagateall(g);  /* propagate changes */
-        changed = 1;  /* will have to revisit all ephemeron tables */
+      if (traverseephemeron(g, gco2t(w))) {  // 传播标记弱key表
+        propagateall(g);  // 弱key表会导致一些对象被标记为灰，需要继续传播这些灰对象，传播标记完灰列表   while (g->gray) propagatemark(g);
+        changed = 1;     //  本轮传播标记了，有双白则会再次插入ephemeron表
       }
     }
-  } while (changed);
+  } while (changed); 
 }
 
 /* }====================================================== */
@@ -974,37 +972,56 @@ static l_mem atomic (lua_State *L) {
   lua_assert(!iswhite(g->mainthread));
   g->gcstate = GCSinsideatomic;
   g->GCmemtrav = 0;  /* start counting work */
-  markobject(g, L);  /* mark running thread */
-  /* registry and global metatables may be changed by API */
-  markvalue(g, &g->l_registry);
-  markmt(g);  /* mark global metatables */
-  /* remark occasional upvalues of (maybe) dead threads */
-  remarkupvals(g);
-  propagateall(g);  /* propagate changes */
+
+  // ******************* 全局的一些内部gc对象标记成灰，清理灰列表*******************
+  markobject(g, L);  /* 标记线程 */
+  markvalue(g, &g->l_registry);  // 标记registry表 
+  markmt(g);  /* 标记g表 */
+  remarkupvals(g);     /* 标记上值 */
+  propagateall(g);  /* 传播遍历这些标记 */
   work = g->GCmemtrav;  /* stop counting (do not recount 'grayagain') */
-  g->gray = grayagain;
-  propagateall(g);  /* traverse 'grayagain' list */
-  g->GCmemtrav = 0;  /* restart counting */
-  convergeephemerons(g);
-  /* at this point, all strongly accessible objects are marked. */
-  /* Clear values from weak tables, before checking finalizers */
-  clearvalues(g, g->weak, NULL);
-  clearvalues(g, g->allweak, NULL);
+  // ******************* 全局的一些内部gc对象标记成灰，清理灰列表*******************
+
+
+  // *******************清理grayagain ******************
+  g->gray = grayagain;  // grayagain 切换成  gray，并且在原子阶段。不会再写入grayagain了。
+  propagateall(g);     // 处理完gray列表，此时是 grayagain
+  g->GCmemtrav = 0;
+  // *******************清理grayagain ******************
+
+
+  // *******************处理弱引用自循环引用问题  ******************
+  convergeephemerons(g); // 清理 弱key表 (ephemeron表)
+  // *******************处理弱引用自循环引用问题  ******************
+
+  
+  // *******************删除弱引用失效对象 ******************
+  // 此时所有强引用的都被标记完了，白色的只能是不可达对象，清理弱表中失效的value
+  clearvalues(g, g->weak, NULL);  // 清理弱表中失效的value
+  clearvalues(g, g->allweak, NULL); 
   origweak = g->weak; origall = g->allweak;
-  work += g->GCmemtrav;  /* stop counting (objects being finalized) */
-  separatetobefnz(g, 0);  /* g->finobj   保存有__gc的被移动到 g->tobefnz */
+  work += g->GCmemtrav;  
+  // *******************删除弱引用失效对象 ******************
+
+  
+  // *******************带--gc元方法的对象复活处理******************
+  separatetobefnz(g, 0);  //  g->finobj里保存有__gc的，并且标白的全部被移动到 g->tobefnz，
   g->gcfinnum = 1;  /* there may be objects to be finalized */
-  markbeingfnz(g);  /* 全部标黑，表示扫描过 */
-  propagateall(g);  /* remark, to propagate 'resurrection' */
+  markbeingfnz(g);  // 对于带--gc元方法的对象，全部复活。   有可能是udata，有可能是table，无引用别人的全部标黑，能引用别人的全部标灰。发生复活
+  propagateall(g);  // --因为复活了一波，所以需要次传播，标记复活的对象
   g->GCmemtrav = 0;  /* restart counting */
-  convergeephemerons(g);
-  /* at this point, all resurrected objects are marked. */
-  /* remove dead objects from weak tables */
+  convergeephemerons(g);    // 清理 弱key表 (ephemeron表) ，再次处理弱引用可能出现的循环引用问题
+  // *******************带--gc元方法的对象复活处理******************
+
+
+  // *******************删除弱引用失效对象 ******************
+  // 此时所有强引用的都被标记完了，白色的只能是不可达对象，清理弱表中失效的kv
   clearkeys(g, g->ephemeron, NULL);  /* clear keys from all ephemeron tables */
   clearkeys(g, g->allweak, NULL);  /* clear keys from all 'allweak' tables */
-  /* clear values from resurrected weak tables */
   clearvalues(g, g->weak, origweak);
   clearvalues(g, g->allweak, origall);
+  // *******************删除弱引用失效对象 ******************
+
   g->currentwhite = cast_byte(otherwhite(g));  /* flip current white */
   work += g->GCmemtrav;  /* complete counting */
   return work;  /* estimate of memory marked by 'atomic' */
