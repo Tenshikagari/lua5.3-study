@@ -59,19 +59,19 @@ const char lua_ident[] =
 
 static TValue *index2addr (lua_State *L, int idx) {
   CallInfo *ci = L->ci;
-  if (idx > 0) {
+  if (idx > 0) {                // idx > 0 表示当前函数的位置开始上数  的第几个栈变量。
     TValue *o = ci->func + idx;
     api_check(idx <= ci->top - (ci->func + 1), "unacceptable index");
     if (o >= L->top) return NONVALIDVALUE;
     else return o;
   }
-  else if (!ispseudo(idx)) {  /* negative index */
+  else if (!ispseudo(idx)) {  /* negative index */  // 负数索引，表示从栈顶往下数 
     api_check(idx != 0 && -idx <= L->top - (ci->func + 1), "invalid index");
     return L->top + idx;
   }
-  else if (idx == LUA_REGISTRYINDEX)
+  else if (idx == LUA_REGISTRYINDEX)  // 返回全局注册表
     return &G(L)->l_registry;
-  else {  /* upvalues */
+  else {  /* upvalues */            //  函数上值列表
     idx = LUA_REGISTRYINDEX - idx;
     api_check(idx <= MAXUPVAL + 1, "upvalue index too large");
     if (ttislcf(ci->func))  /* light C function? */
@@ -635,12 +635,13 @@ LUA_API int lua_rawget (lua_State *L, int idx) {
 }
 
 
+// 用一个虚拟索引，去获得哈希表。以n为key
 LUA_API int lua_rawgeti (lua_State *L, int idx, lua_Integer n) {
   StkId t;
   lua_lock(L);
   t = index2addr(L, idx);
   api_check(ttistable(t), "table expected");
-  setobj2s(L, L->top, luaH_getint(hvalue(t), n));
+  setobj2s(L, L->top, luaH_getint(hvalue(t), n));  //   luaH_getint(hvalue(t), n) 从哈希表里取 等价 t[n] ，然后再设置到栈顶
   api_incr_top(L);
   lua_unlock(L);
   return ttnov(L->top - 1);

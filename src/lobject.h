@@ -220,7 +220,7 @@ typedef struct lua_TValue TValue;
 
 #define setthvalue(L,obj,x) \
   { TValue *io = (obj); lua_State *x_ = (x); \
-    val_(io).gc = obj2gco(x_); settt_(io, ctb(LUA_TTHREAD)); \
+    val_(io).gc = obj2gco(x_); settt_(io, ctb(LUA_TTHREAD)); \ 
     checkliveness(G(L),io); }
 
 #define setclLvalue(L,obj,x) \
@@ -237,8 +237,9 @@ typedef struct lua_TValue TValue;
   { TValue *io = (obj); Table *x_ = (x); \
     val_(io).gc = obj2gco(x_); settt_(io, ctb(LUA_TTABLE)); \
     checkliveness(G(L),io); }
-
-#define setdeadvalue(obj)	settt_(obj, LUA_TDEADKEY)
+ 
+//  (obj)->tt_= LUA_TDEADKEY  LUA_TDEADKEY  这种类型是一种特殊类型，专用来做内部标记用。
+#define setdeadvalue(obj)	settt_(obj, LUA_TDEADKEY) 
 
 
 
